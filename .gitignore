@@ -5,6 +5,8 @@ target
 .cargo
 *.pyc
 
+.idea
+
 # snapcraft artifacts
 /parts
 /prime
