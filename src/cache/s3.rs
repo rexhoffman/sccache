@@ -19,7 +19,6 @@ use futures::future::Future;
 use futures_03::future::TryFutureExt as _;
 use hyperx::header::CacheDirective;
 use rusoto_core::{self, Client, HttpClient, Region};
-use rusoto_credential::{AwsCredentials, CredentialsError, ProvideAwsCredentials};
 use rusoto_s3::{GetObjectOutput, GetObjectRequest, PutObjectRequest, S3Client, S3 as _};
 use std::io;
 use std::str::FromStr;
@@ -27,7 +26,10 @@ use std::time::{Duration, Instant};
 use tokio_02::io::AsyncReadExt as _;
 
 use crate::errors::*;
-use rusoto_core::credential::AutoRefreshingProvider;
+use rusoto_core::credential::{
+    AutoRefreshingProvider, AwsCredentials, CredentialsError, EnvironmentProvider,
+    ProvideAwsCredentials,
+};
 
 /// A cache that stores entries in Amazon S3.
 pub struct S3Cache {
@@ -68,7 +70,7 @@ impl S3Cache {
             S3Client::new_with_client(client, region)
         } else {
             let default_plus_eks_credential_provider =
-                AutoRefreshingProvider::new(FancyCredentialsProvider::new())
+                AutoRefreshingProvider::new(FancyCredentialsProvider::default())
                     .expect("failed to create eks web identity provider");
             S3Client::new_with(
                 HttpClient::new().expect("failed to create request dispatcher"),
@@ -183,29 +185,40 @@ impl Storage for S3Cache {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct FancyCredentialsProvider {}
-
-impl FancyCredentialsProvider {
-    fn new() -> Self {
-        FancyCredentialsProvider {}
-    }
-}
 
 #[async_trait]
 impl ProvideAwsCredentials for FancyCredentialsProvider {
     async fn credentials(&self) -> std::result::Result<AwsCredentials, CredentialsError> {
-        rusoto_credential::ChainProvider::new()
-            .credentials()
-            .or_else(|err| async move {
-                debug!(
-                    "Failed to get S3 credentials from the default chain provider {:?}",
-                    err
-                );
-                rusoto_sts::WebIdentityProvider::from_k8s_env()
-                    .credentials()
-                    .await
-            })
-            .await
+        chain_provider_credentials().await
     }
+}
+
+async fn chain_provider_credentials() -> std::result::Result<AwsCredentials, CredentialsError> {
+    use rusoto_core::credential::{ContainerProvider, InstanceMetadataProvider, ProfileProvider};
+
+    if let Ok(creds) = EnvironmentProvider::default().credentials().await {
+        return Ok(creds);
+    }
+    if let Ok(creds) = rusoto_sts::WebIdentityProvider::from_k8s_env()
+        .credentials()
+        .await
+    {
+        return Ok(creds);
+    }
+    if let Ok(ref profile_provider) = ProfileProvider::new() {
+        if let Ok(creds) = profile_provider.credentials().await {
+            return Ok(creds);
+        }
+    }
+    if let Ok(creds) = ContainerProvider::new().credentials().await {
+        return Ok(creds);
+    }
+    if let Ok(creds) = InstanceMetadataProvider::new().credentials().await {
+        return Ok(creds);
+    }
+    Err(CredentialsError::new(
+        "Couldn't find AWS credentials in environment, credentials file, or IAM role.",
+    ))
 }
