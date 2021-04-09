@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use crate::cache::{Cache, CacheRead, CacheWrite, Storage};
+use async_trait::async_trait;
 use futures::future;
 use futures::future::Future;
 use futures_03::future::TryFutureExt as _;
 use hyperx::header::CacheDirective;
 use rusoto_core::{self, Client, HttpClient, Region};
+use rusoto_credential::{AwsCredentials, CredentialsError, ProvideAwsCredentials};
 use rusoto_s3::{GetObjectOutput, GetObjectRequest, PutObjectRequest, S3Client, S3 as _};
 use std::io;
 use std::str::FromStr;
@@ -65,14 +67,15 @@ impl S3Cache {
             );
             S3Client::new_with_client(client, region)
         } else {
-            let eks_credential_provider =
-                AutoRefreshingProvider::new(rusoto_sts::WebIdentityProvider::from_k8s_env())
+            let default_plus_eks_credential_provider =
+                AutoRefreshingProvider::new(FancyCredentialsProvider::new())
                     .expect("failed to create eks web identity provider");
             S3Client::new_with(
                 HttpClient::new().expect("failed to create request dispatcher"),
-                eks_credential_provider,
+                default_plus_eks_credential_provider,
                 region,
             )
+            // S3Client::new(region)
         };
 
         Ok(S3Cache {
@@ -177,5 +180,32 @@ impl Storage for S3Cache {
     }
     fn max_size(&self) -> SFuture<Option<u64>> {
         Box::new(future::ok(None))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FancyCredentialsProvider {}
+
+impl FancyCredentialsProvider {
+    fn new() -> Self {
+        FancyCredentialsProvider {}
+    }
+}
+
+#[async_trait]
+impl ProvideAwsCredentials for FancyCredentialsProvider {
+    async fn credentials(&self) -> std::result::Result<AwsCredentials, CredentialsError> {
+        rusoto_credential::ChainProvider::new()
+            .credentials()
+            .or_else(|err| async move {
+                debug!(
+                    "Failed to get S3 credentials from the default chain provider {:?}",
+                    err
+                );
+                rusoto_sts::WebIdentityProvider::from_k8s_env()
+                    .credentials()
+                    .await
+            })
+            .await
     }
 }
