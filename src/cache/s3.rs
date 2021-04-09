@@ -69,15 +69,14 @@ impl S3Cache {
             );
             S3Client::new_with_client(client, region)
         } else {
-            let default_plus_eks_credential_provider =
-                AutoRefreshingProvider::new(FancyCredentialsProvider::default())
-                    .expect("failed to create eks web identity provider");
+            let credential_provider =
+                AutoRefreshingProvider::new(ChainCredentialProvider::default())
+                    .expect("failed to create a credential provider");
             S3Client::new_with(
                 HttpClient::new().expect("failed to create request dispatcher"),
-                default_plus_eks_credential_provider,
+                credential_provider,
                 region,
             )
-            // S3Client::new(region)
         };
 
         Ok(S3Cache {
@@ -186,15 +185,17 @@ impl Storage for S3Cache {
 }
 
 #[derive(Debug, Clone, Default)]
-struct FancyCredentialsProvider {}
+struct ChainCredentialProvider {}
 
 #[async_trait]
-impl ProvideAwsCredentials for FancyCredentialsProvider {
+impl ProvideAwsCredentials for ChainCredentialProvider {
     async fn credentials(&self) -> std::result::Result<AwsCredentials, CredentialsError> {
         chain_provider_credentials().await
     }
 }
 
+/// This is similar to the default chain provider in rusoto_credential lib.rs but adds the
+/// WebIdentityProvider after the EnvironmentProvider to inject credentials from the EKS IRSA method
 async fn chain_provider_credentials() -> std::result::Result<AwsCredentials, CredentialsError> {
     use rusoto_core::credential::{ContainerProvider, InstanceMetadataProvider, ProfileProvider};
 
