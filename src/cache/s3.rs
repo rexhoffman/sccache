@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use tokio_02::io::AsyncReadExt as _;
 
 use crate::errors::*;
+use rusoto_core::credential::AutoRefreshingProvider;
 
 /// A cache that stores entries in Amazon S3.
 pub struct S3Cache {
@@ -64,7 +65,14 @@ impl S3Cache {
             );
             S3Client::new_with_client(client, region)
         } else {
-            S3Client::new(region)
+            let eks_credential_provider =
+                AutoRefreshingProvider::new(rusoto_sts::WebIdentityProvider::from_k8s_env())
+                    .expect("failed to create eks web identity provider");
+            S3Client::new_with(
+                HttpClient::new().expect("failed to create request dispatcher"),
+                eks_credential_provider,
+                region,
+            )
         };
 
         Ok(S3Cache {
